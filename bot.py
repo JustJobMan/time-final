@@ -24,6 +24,7 @@ DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 # 배포 환경에서는 DISCORD_TOKEN이 필수적으로 설정되어야 해.
 if not DISCORD_TOKEN:
     print("경고: DISCORD_TOKEN 환경 변수가 설정되지 않았습니다. 로컬 테스트 중이거나 배포 환경에서 설정이 필요합니다.")
+    # 로컬에서 첫 인증을 위해 실행할 때는 이 경고가 뜨더라도 계속 진행됩니다.
 
 # --- OAuth 인증 관련 설정 ---
 # 인증에 필요한 범위 (유튜브 영상 정보 읽기 전용)
@@ -140,7 +141,6 @@ def extract_video_id(url):
 
 # --- 전역 변수 (봇이 라이브 상태를 기억하게 할 거야!) ---
 is_live = False # 현재 방송 중인지 아닌지
-# live_chat_id = None # 현재 라이브 방송의 채팅 ID (나중에 채팅 봇 만들 때 쓸 수 있어) - 현재 버전에서는 사용 안 함
 live_start_time = None # 방송 시작 시간
 live_end_time = None # 방송 종료 시간
 target_channel_id = 0 # 디스코드 메시지를 보낼 채널 ID (이 채널로 라이브 알림을 보낼 거야!)
@@ -148,7 +148,7 @@ CHECK_INTERVAL_SECONDS = 60 # 몇 초마다 유튜브 방송 상태를 확인할
 
 # --- 유튜브 라이브 상태 확인 함수 (주기적으로 실행될 거야!) ---
 async def check_youtube_live_status():
-    global is_live, live_start_time, live_end_time, target_channel_id # live_chat_id는 현재 버전에서 사용 안 함
+    global is_live, live_start_time, live_end_time, target_channel_id
 
     # 봇이 완전히 준비될 때까지 기다려.
     await client.wait_until_ready()
@@ -160,7 +160,7 @@ async def check_youtube_live_status():
             # 인증된 유튜브 서비스 객체 가져오기 (항상 최신 인증 정보로)
             current_youtube_service = get_authenticated_service_instance()
 
-            # YOUTUBE_CHANNEL_ID는 Secrets에 추가해야 해!
+            # YOUTUBE_CHANNEL_ID는 Secrets에서 가져옵니다.
             youtube_channel_id = os.environ.get('YOUTUBE_CHANNEL_ID')
             if not youtube_channel_id:
                 print("경고: YOUTUBE_CHANNEL_ID 환경 변수가 설정되지 않았습니다. 실시간 감지 기능을 사용할 수 없습니다.")
@@ -210,7 +210,6 @@ async def check_youtube_live_status():
                 if is_live: # 이전에 라이브 중이었는데 지금 라이브가 끝났다면!
                     is_live = False
                     live_end_time = datetime.datetime.now() # 현재 시간을 종료 시간으로 기록!
-                    # live_chat_id = None # 채팅 ID 초기화 - 현재 버전에서 사용 안 함
 
                     # 총 방송 시간 계산!
                     total_duration = live_end_time - live_start_time
