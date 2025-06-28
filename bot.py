@@ -24,7 +24,6 @@ DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 # 배포 환경에서는 DISCORD_TOKEN이 필수적으로 설정되어야 해.
 if not DISCORD_TOKEN:
     print("경고: DISCORD_TOKEN 환경 변수가 설정되지 않았습니다. 로컬 테스트 중이거나 배포 환경에서 설정이 필요합니다.")
-    # 로컬에서 첫 인증을 위해 실행할 때는 이 경고가 뜨더라도 계속 진행됩니다.
 
 # --- OAuth 인증 관련 설정 ---
 # 인증에 필요한 범위 (유튜브 영상 정보 읽기 전용)
@@ -139,6 +138,111 @@ def extract_video_id(url):
         return match.group(6)
     return None
 
+# --- 전역 변수 (봇이 라이브 상태를 기억하게 할 거야!) ---
+is_live = False # 현재 방송 중인지 아닌지
+# live_chat_id = None # 현재 라이브 방송의 채팅 ID (나중에 채팅 봇 만들 때 쓸 수 있어) - 현재 버전에서는 사용 안 함
+live_start_time = None # 방송 시작 시간
+live_end_time = None # 방송 종료 시간
+target_channel_id = 0 # 디스코드 메시지를 보낼 채널 ID (이 채널로 라이브 알림을 보낼 거야!)
+CHECK_INTERVAL_SECONDS = 60 # 몇 초마다 유튜브 방송 상태를 확인할지 (1분)
+
+# --- 유튜브 라이브 상태 확인 함수 (주기적으로 실행될 거야!) ---
+async def check_youtube_live_status():
+    global is_live, live_start_time, live_end_time, target_channel_id # live_chat_id는 현재 버전에서 사용 안 함
+
+    # 봇이 완전히 준비될 때까지 기다려.
+    await client.wait_until_ready()
+
+    # 봇이 살아있는 동안 계속 반복할 거야.
+    while not client.is_closed():
+        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 유튜브 라이브 상태 확인 중...")
+        try:
+            # 인증된 유튜브 서비스 객체 가져오기 (항상 최신 인증 정보로)
+            current_youtube_service = get_authenticated_service_instance()
+
+            # YOUTUBE_CHANNEL_ID는 Secrets에 추가해야 해!
+            youtube_channel_id = os.environ.get('YOUTUBE_CHANNEL_ID')
+            if not youtube_channel_id:
+                print("경고: YOUTUBE_CHANNEL_ID 환경 변수가 설정되지 않았습니다. 실시간 감지 기능을 사용할 수 없습니다.")
+                await asyncio.sleep(CHECK_INTERVAL_SECONDS) # 잠시 기다렸다가 다시 시도
+                continue # 다음 루프로 건너뛰기
+
+            # 유튜브 API를 호출해서 채널의 라이브 방송 상태를 가져올 거야.
+            request = current_youtube_service.search().list(
+                channelId=youtube_channel_id, # YOUTUBE_CHANNEL_ID 사용
+                eventType='live', # 라이브 중인 비디오만 검색
+                type='video',
+                part='id,snippet',
+                maxResults=1 # 가장 최근 라이브 방송 하나만 가져와
+            )
+            response = request.execute()
+
+            current_live_video = response.get('items')
+
+            if current_live_video and len(current_live_video) > 0:
+                # 라이브 중이야!
+                live_video_id = current_live_video[0]['id']['videoId']
+
+                if not is_live: # 이전에 라이브 중이 아니었는데 지금 라이브가 시작됐다면!
+                    is_live = True
+                    live_start_time = datetime.datetime.now() # 현재 시간을 시작 시간으로 기록!
+                    live_end_time = None # 종료 시간은 초기화
+
+                    # 디스코드에 방송 시작 알림 보내기!
+                    if target_channel_id != 0:
+                        channel = client.get_channel(target_channel_id)
+                        if channel:
+                            await channel.send(
+                                f"🚨 **라이브 방송 시작!** 🚨\n"
+                                f"시작 시간: {live_start_time.strftime('%Y년 %m월 %d일 %H시 %M분 %S초')}\n"
+                                f"지금 바로 보러 가자! ➡️ https://www.youtube.com/watch?v={live_video_id}"
+                            )
+                            print(f"디스코드에 라이브 시작 알림 전송: {live_start_time}")
+                        else:
+                            print(f"오류: 디스코드 채널 ID {target_channel_id}를 찾을 수 없습니다.")
+                    else:
+                        print("경고: 디스코드 메시지를 보낼 채널 ID가 설정되지 않았습니다. `!채널설정` 명령을 사용해주세요.")
+                else:
+                    print("라이브 방송 진행 중...")
+
+            else:
+                # 라이브 중이 아니야!
+                if is_live: # 이전에 라이브 중이었는데 지금 라이브가 끝났다면!
+                    is_live = False
+                    live_end_time = datetime.datetime.now() # 현재 시간을 종료 시간으로 기록!
+                    # live_chat_id = None # 채팅 ID 초기화 - 현재 버전에서 사용 안 함
+
+                    # 총 방송 시간 계산!
+                    total_duration = live_end_time - live_start_time
+                    hours = int(total_duration.total_seconds() // 3600)
+                    minutes = int((total_duration.total_seconds() % 3600) // 60)
+                    seconds = int(total_duration.total_seconds() % 60)
+
+                    # 디스코드에 방송 종료 알림 및 총 방송 시간 보내기!
+                    if target_channel_id != 0:
+                        channel = client.get_channel(target_channel_id)
+                        if channel:
+                            response_message = (
+                                f" **라이브 방송 종료!** \n"
+                                f"시작 시간: {live_start_time.strftime('%Y년 %m월 %d일 %H시 %M분 %S초')}\n"
+                                f"종료 시간: {live_end_time.strftime('%Y년 %m월 %d일 %H시 %M분 %S초')}\n"
+                                f"**총 방송 시간: {hours}시간 {minutes}분 {seconds}초**"
+                            )
+                            await channel.send(response_message)
+                            print(f"디스코드에 라이브 종료 알림 및 총 방송 시간 전송: {live_end_time}")
+                        else:
+                            print(f"오류: 디스코드 채널 ID {target_channel_id}를 찾을 수 없습니다.")
+                    else:
+                        print("경고: 디스코드 메시지를 보낼 채널 ID가 설정되지 않았습니다. `!채널설정` 명령을 사용해주세요.")
+                else:
+                    print("라이브 방송 진행 중 아님. 대기 중...")
+
+        except Exception as e:
+            print(f"유튜브 API 호출 중 오류 발생: {e}")
+
+        # 다음 확인까지 잠시 기다려.
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
 # --- Flask Health Check (봇을 24시간 돌릴 때 필요해!) ---
 app = Flask(__name__)
 
@@ -177,14 +281,20 @@ if __name__ == '__main__':
     async def on_ready():
         print(f'로그인 성공! 봇 이름: {client.user}')
         print('봇이 온라인 상태가 되었어요! 이제 유튜브 링크를 기다릴게! 🔗')
+        print("디스코드 알림을 받을 채널에서 `!채널설정` 명령어를 입력해주세요.") # 채널 설정 안내 추가
 
         # 봇이 준비되면 Flask Health Check 서버를 백그라운드에서 실행!
         flask_thread = Thread(target=run_flask)
         flask_thread.start()
         print(f"Flask Health Check 서버 시작됨 (Port: {os.environ.get('PORT', 8080)})")
 
+        # 유튜브 라이브 상태 확인 코루틴을 백그라운드에서 실행!
+        client.loop.create_task(check_youtube_live_status())
+
+
     @client.event
     async def on_message(message):
+        global target_channel_id # 전역 변수를 수정할 거라고 알려주는 거야.
         if message.author == client.user: # 봇 자신이 보낸 메시지는 무시!
             return
 
@@ -245,11 +355,11 @@ if __name__ == '__main__':
                     seconds = total_seconds % 60
 
                     response_message = (
-                        f"**🔗 영상 제목:** {title}\n"
-                        f"**📅 날짜:** {start_dt_kst.strftime('%m/%d')}\n"
-                        f"**⏰ 방송 시작:** {start_dt_kst.strftime('%H:%M')}\n"
-                        f"**⏱️ 방송 종료:** {end_dt_kst.strftime('%H:%M')}\n"
-                        f"**⏳ 총 방송 시간:** {hours}시간 {minutes}분 {seconds}초"
+                        f"** 영상 제목:** {title}\n"
+                        f"** 날짜:** {start_dt_kst.strftime('%m/%d')}\n"
+                        f"** 방송 시작:** {start_dt_kst.strftime('%H:%M')}\n"
+                        f"** 방송 종료:** {end_dt_kst.strftime('%H:%M')}\n"
+                        f"** 총 방송 시간:** {hours}시간 {minutes}분 {seconds}초"
                     )
                 elif 'scheduledStartTime' in live_details and 'actualStartTime' not in live_details:
                     response_message = (
@@ -272,6 +382,14 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"링크 처리 중 오류 발생: {e}")
                 await message.channel.send(f"링크 처리 중 문제가 발생했어! ㅠㅠ 오류 내용: `{e}`")
+        
+        # 봇이 알림을 보낼 디스코드 채널 설정하기
+        if message.content == '!채널설정':
+            # 메시지를 보낸 채널의 ID를 저장!
+            target_channel_id = message.channel.id
+            await message.channel.send(f"앞으로 유튜브 라이브 알림은 이 채널({message.channel.name})로 보낼게! (채널 ID: `{target_channel_id}`)")
+            print(f"디스코드 알림 채널이 {message.channel.name} (ID: {target_channel_id})로 설정되었습니다.")
+            return # 이 명령어 처리 후 함수 종료
 
     # 디스코드 봇을 실행!
     client.run(DISCORD_TOKEN)
